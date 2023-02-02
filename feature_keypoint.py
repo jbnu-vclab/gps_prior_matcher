@@ -2,15 +2,18 @@ import cv2
 import math
 
 def array_to_keypoint(arr):
+    '''COLMAP keypoint -> OpenCV keypoint
+    '''
     fkp = feature_keypoint(arr[0], arr[1], arr[2], arr[3], arr[4], arr[5])
     return fkp
 
 def arrays_to_keypoints(li):
+    '''COLMAP keypoint list -> OpenCV keypoint list
+    '''
     fkps = []
     for kp in li:
         fkp = array_to_keypoint(kp)
         fkps.append(fkp.to_cv_keypoint())
-        
     return fkps
 
 class feature_keypoint:
