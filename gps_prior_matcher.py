@@ -9,9 +9,13 @@ import collections
 import feature_keypoint as fkp
 import visualization as vis
 import math
+import time
 
 IS_PYTHON3 = sys.version_info[0] >= 3
 MAX_IMAGE_ID = 2**31 - 1
+
+def distance(p1: np.array, p2: np.array) -> float:
+    return np.linalg.norm(p2-p1)
 
 def normalize(vec: np.array) -> np.array:
     norm = np.linalg.norm(vec)
@@ -61,6 +65,8 @@ class GPSPriorMatcher:
         self.num_neighbors = self.args.num_neighbors
         self.min_match_pairs = self.args.min_match_pairs
         self.overlap = self.args.overlap
+        self.fov = self.args.fov
+        self.max_distance = self.args.max_distance
         
         self.cursor = self.connection.cursor()
         self.read_cameras()
@@ -73,17 +79,21 @@ class GPSPriorMatcher:
 
         self.init_matcher()
         self.sort_keypoints_and_descriptors()
+        self.precompute_gps()
+        self.precompute_accumulated_distance()
     
     def parse_args(self):
         parser = argparse.ArgumentParser()
         parser.add_argument("--database_path", required=True)
         parser.add_argument("--image_path", required=True)
         # parser.add_argument("--output_path", required=True)
-        parser.add_argument("--min_num_matches", type=int, default=15)
+        # parser.add_argument("--min_num_matches", type=int, default=15)
         parser.add_argument("--num_neighbors", type=int, default=25)
-        parser.add_argument("--min_match_pairs", type=int, default=2)
+        parser.add_argument("--min_match_pairs", type=int, default=15)
         parser.add_argument("--overlap", type=float, default=1.0)
+        parser.add_argument("--fov", type=float, default=2.0)
         parser.add_argument("--distance_threshold", type=float, default=0.73)
+        parser.add_argument("--max_distance", type=float, default=60.0)
         args = parser.parse_args()
         return args
 
@@ -191,33 +201,51 @@ class GPSPriorMatcher:
         self.descriptors = sorted(self.descriptors, key=lambda d: d['image_id'])
         return self.descriptors
     
-    def read_two_view_geometries(self):
-        self.two_view_geometries = []
-        self.cursor.execute("SELECT pair_id, rows, cols, data, config, F, E, H, qvec, tvec FROM two_view_geometries;")
-        for row in self.cursor:
-            self.two_view_geometries.append(
-                {
-                    "pair_id" : int(row[0]),
-                    "row" : row[1],
-                    "cols" : row[2],
-                    "data" : blob_to_array(row[3], dtype=np.uint32, shape=(row[1], row[2])),
-                }
-            )
-        # self.two_view_geometries = sorted(self.two_view_geometries, key=lambda d: d['image_id'])
-        return self.two_view_geometries
+    # def read_two_view_geometries(self):
+    #     self.two_view_geometries = []
+    #     self.cursor.execute("SELECT pair_id, rows, cols, data, config, F, E, H, qvec, tvec FROM two_view_geometries;")
+    #     for row in self.cursor:
+    #         self.two_view_geometries.append(
+    #             {
+    #                 "pair_id" : int(row[0]),
+    #                 "row" : row[1],
+    #                 "cols" : row[2],
+    #                 "data" : blob_to_array(row[3], dtype=np.uint32, shape=(row[1], row[2])),
+    #             }
+    #         )
+    #     # self.two_view_geometries = sorted(self.two_view_geometries, key=lambda d: d['image_id'])
+    #     return self.two_view_geometries
     
     def get_gps_from_image(self, image: dict) -> np.array:
         return np.array(self.geodetic_to_ned(image['prior_tx'], image['prior_ty'], image['prior_tz']))
     
     def get_vector_from_image(self, image_id:int) -> np.array:
         #* use previous adjacent vector if image_id2 is last index
-        image = self.images[image_id if image_id < self.last_image_id else image_id - 1]
-        next_image = self.images[image_id + 1 if image_id < self.last_image_id else image_id]
+        image_id = image_id if image_id < self.last_image_id else image_id - 1
+        next_image_id = image_id + 1 if image_id < self.last_image_id else image_id
         
-        gps, next_gps = self.get_gps_from_image(image), self.get_gps_from_image(next_image)
+        gps, next_gps = self.gps[image_id], self.gps[next_image_id]
         vec = get_adjacent_vector(gps, next_gps)
 
         return vec
+    
+    def precompute_gps(self):
+        self.gps = [self.get_gps_from_image(img) for img in self.images]
+
+    def precompute_accumulated_distance(self):
+        self.accumulated_dist = [0]
+        prev_dist = 0.0
+        prev_gps = self.gps[0]
+        for cur_gps in self.gps:
+            prev_dist = distance(prev_gps, cur_gps) + prev_dist
+            prev_gps = cur_gps
+            self.accumulated_dist.append(prev_dist)
+    
+    def get_accumulated_distance(self, image_id1, image_id2):
+        if image_id1 > image_id2:
+            image_id1, image_id2 = image_id2, image_id1
+        return self.accumulated_dist[image_id2] - self.accumulated_dist[image_id1]
+            
 
     def get_signed_angle_from_images(self, image_id1: int, image_id2: int) -> float:
         vec1, vec2 = self.get_vector_from_image(image_id1), self.get_vector_from_image(image_id2)
@@ -252,27 +280,16 @@ class GPSPriorMatcher:
 
         return np.array(db_indices, dtype=np.uint32)
 
-    def match_single_pair(self, image_id1: int, image_id2: int, signed_angle:float, unsigned_angle: float):
+    def match_single_pair(self, image_id1: int, image_id2: int, signed_angle:float, accumulated_dist: float):
         # cos_sim = self.get_cos_sim_from_images(image_id1, image_id2)
     
         keypoints1, descriptors1 = self.keypoints[image_id1]['data'], self.descriptors[image_id1]['data']
         keypoints2, descriptors2 = self.keypoints[image_id2]['data'], self.descriptors[image_id2]['data']
 
-        if signed_angle < 0.0:
-            overlap_begin1 = 0
-            overlap_end1 = int((1 - (unsigned_angle / (math.pi / 2.0))) * self.image_width * 1.4)
-            overlap_end1 = self.image_width if overlap_end1 >= self.image_width else overlap_end1
-            overlap_begin2 = self.image_width - overlap_end1
-            overlap_end2 = self.image_width
-        else:
-            overlap_begin2 = 0
-            overlap_end2 = int((1 - (unsigned_angle / (math.pi / 2.0))) * self.image_width * 1.4)
-            overlap_end2 = self.image_width if overlap_end2 >= self.image_width else overlap_end2
-            overlap_begin1 = self.image_width - overlap_end2
-            overlap_end1 = self.image_width
+        overlap_begin1, overlap_end1, overlap_begin2, overlap_end2 = self.get_overlap_indices(signed_angle, accumulated_dist)
 
-        overlap_indices1 = [i for i, kp in enumerate(keypoints1) if overlap_begin1 < kp[0] < overlap_end1]
-        overlap_indices2 = [i for i, kp in enumerate(keypoints2) if overlap_begin2 < kp[0] < overlap_end2]
+        overlap_indices1 = [i for i, kp in enumerate(keypoints1) if overlap_begin1 <= (kp[0], kp[1]) <= overlap_end1]
+        overlap_indices2 = [i for i, kp in enumerate(keypoints2) if overlap_begin2 <= (kp[0], kp[1]) <= overlap_end2]
 
         overlap_keypoints1 = np.array([kp for i, kp in enumerate(keypoints1) if i in overlap_indices1])
         overlap_keypoints2 = np.array([kp for i, kp in enumerate(keypoints2) if i in overlap_indices2])
@@ -284,28 +301,104 @@ class GPSPriorMatcher:
         origin_keypoints1 = fkp.arrays_to_keypoints(keypoints1)
         origin_keypoints2 = fkp.arrays_to_keypoints(keypoints2)
         
+        print(overlap_begin1, overlap_end1, overlap_begin2, overlap_end2)
+
         raw_matches = self.matcher.knnMatch(overlap_descriptors1, overlap_descriptors2, 2)
 
         good_matches = [match[0] for match in raw_matches if match[0].distance / match[1].distance < self.distance_threshold]
 
+        # res = np.full((1080, 4000, 3), 255, dtype=np.uint8)
         img1 = cv2.imread(self.image_path + '/' + self.images[image_id1]['name'])
-        img1 = vis.draw_left_right_arrow(img1, overlap_begin1, 800, overlap_end1, 800)
         img2 = cv2.imread(self.image_path + '/' + self.images[image_id2]['name'])
-        img2 = vis.draw_left_right_arrow(img2, overlap_begin2, 800, overlap_end2, 800)
+        # h, w, c = img1.shape
 
+        # crop = res[0:0+h, 1000:1000+w]
+        # # crop = canv[0:w, 0:h]
+        # mask = np.full(img1.shape, 255,dtype=np.uint8)
+        # alpha = 1 - (accumulated_dist / self.max_distance)
+        # img2 = cv2.resize(img2, (0, 0), fx=alpha, fy=alpha)
+
+        # crop2 = res[overlap]
+        # print(crop.shape)
+        # cv2.copyTo(img1, mask, crop)
+
+        # img1 = vis.draw_left_right_arrow(img1, overlap_begin1, overlap_end1)
+        # img2 = vis.draw_left_right_arrow(img2, overlap_begin2, 800, overlap_end2, 800)
+
+
+        img1 = cv2.rectangle(img1, (int(overlap_begin1[0]), int(overlap_begin1[1])), (int(overlap_end1[0]), int(overlap_end1[1])), (0, 0, 255), 4)
+        img2 = cv2.rectangle(img2, (int(overlap_begin2[0]), int(overlap_begin2[1])), (int(overlap_end2[0]), int(overlap_end2[1])), (255, 0, 0), 4)
         res = vis.draw_matches_pair(img1, img2, overlap_keypoints1, overlap_keypoints2, good_matches)
 
-        cv2.imwrite(f'C:/Users/DongwonJeong/Desktop/TestOut/{image_id1}_{image_id2}.jpg', res)
+        # cv2.imwrite(f'C:/Users/DongwonJeong/Desktop/TestOut/{image_id1}_{image_id2}.jpg', res)
         res = cv2.resize(res, (0, 0), fx=0.5, fy=0.5)
-        # cv2.imshow(f'{image_id1}_{image_id2}', res)
+        cv2.imshow(f'{image_id1}_{image_id2}', res)
         cv2.waitKey()
         cv2.destroyAllWindows()
         matches = self.change_indices_for_db(good_matches, overlap_indices1, overlap_indices2)
 
         return matches
+    
+    def get_overlap_indices(self, signed_angle:float, accumulated_dist:float) -> tuple:
+        alpha = 1 - (accumulated_dist / self.max_distance)
+        beta = (signed_angle / self.fov) * np.exp(alpha * 6.5)
+        assert(alpha <= 1.0)
 
+        print(f'alpha: {alpha}, beta: {beta}')
+
+        w, h, half_w, half_h = self.image_width, self.image_height, self.image_width/2, self.image_height/2
+
+        init_box = np.float32([[0, w],[0, h], [1, 1]])
+    
+        Mat = np.float32([[alpha, 0, half_w * (1 - alpha) + beta], [0, alpha, half_h * (1 - alpha)], [0, 0, 1]])
+
+        print(init_box)
+        print(Mat)
+        moved_box = Mat @ init_box
+        print(moved_box)
+        xmin_1, ymin_1, xmax_1, ymax_1 = 0, 0, w, h
+        xmin_2, ymin_2, xmax_2, ymax_2 = moved_box[0][0], moved_box[1][0], moved_box[0][1], moved_box[1][1]
+
+        print(xmin_1, ymin_1, xmax_1, ymax_1)
+        print(xmin_2, ymin_2, xmax_2, ymax_2)
+
+        # intersection = ((xmin_2, ymin_2), (xmax_2, ymax_2))
+        intersection = ((max(xmin_1, xmin_2, 0), max(ymin_1, ymin_2, 0)), (min(xmax_1, xmax_2, w), min(ymax_1, ymax_2, h)))
+
+        print(intersection)
+
+        overlap_begin1, overlap_end1 = intersection
+        overlap_begin2 = (overlap_begin1[0] - xmin_2, 0)
+        overlap_end2 = (overlap_end1[0] - xmin_2, h)
+
+        #* cal
+        # if signed_angle < 0:
+        #     overlap_begin1 = (0, half_h * (1 - alpha))
+        #     overlap_end1 = (half_w * (alpha - beta + 1), half_h * (1 + alpha))
+        #     overlap_begin2 = (abs(half_w * (alpha + beta - 1)), 0)
+        #     overlap_end2 = (w, h)
+        # else:
+        #     overlap_begin1 = (half_w * (1 - alpha + beta), half_h * (1 - alpha))
+        #     overlap_end1 = (w, half_h * (1 + alpha))
+        #     overlap_begin2 = (0, 0)
+        #     overlap_end2 = (half_w * (alpha - beta + 1), h)
+
+        # if signed_angle < 0.0:
+        #     overlap_begin1 = 0
+        #     overlap_end1 = int((1 - (unsigned_angle / (math.pi / 2.0))) * self.image_width * 1.2)
+        #     overlap_end1 = self.image_width if overlap_end1 >= self.image_width else overlap_end1
+        #     overlap_begin2 = self.image_width - overlap_end1
+        #     overlap_end2 = self.image_width
+        # else:
+        #     overlap_begin2 = 0
+        #     overlap_end2 = int((1 - (unsigned_angle / (math.pi / 2.0))) * self.image_width * 1.2)
+        #     overlap_end2 = self.image_width if overlap_end2 >= self.image_width else overlap_end2
+        #     overlap_begin1 = self.image_width - overlap_end2
+        #     overlap_end1 = self.image_width
+        
+        return overlap_begin1, overlap_end1, overlap_begin2, overlap_end2
+            
     def gps_prior_matching(self):
-        # self.match_single_pair(40, 30)
         match_result = []
         match_info = []
         for image_id1, image1 in enumerate(self.images):
@@ -313,17 +406,21 @@ class GPSPriorMatcher:
                 image_id2 = image_id1 + i
                 if image_id2 > self.last_image_id:
                     break
-
-                print(f'- Matching {image_id1} & {image_id2}...')
+                
+                image1_name = self.images[image_id1]['name']
+                image2_name = self.images[image_id2]['name']
+                print(f'- Matching {image1_name} & {image2_name}...')
 
                 signed_angle = self.get_signed_angle_from_images(image_id1, image_id2)
                 unsigned_angle = abs(signed_angle)
 
-                if unsigned_angle >= math.pi / 2.0:
-                    print(f'zero matching expected (angle is bigger than fov, {signed_angle})')
+                if unsigned_angle >= self.fov:
+                    print(f'zero matching expected (angle is bigger than fov, {signed_angle}, {unsigned_angle})')
                     break
+                
+                dist = gps_matcher.get_accumulated_distance(image_id1, image_id2)
 
-                matches = self.match_single_pair(image_id1, image_id2, signed_angle, unsigned_angle)
+                matches = self.match_single_pair(image_id1, image_id2, signed_angle, dist)
                 shape = matches.shape
 
                 if shape[0] < self.min_match_pairs:
@@ -364,16 +461,31 @@ class GPSPriorMatcher:
         self.connection.close()
 
 if __name__ == "__main__":
+    t1 = time.time()
     gps_matcher = GPSPriorMatcher()
 
-    # signed_angle = gps_matcher.get_signed_angle_from_images(0, 1)
-    # unsigned_angle = abs(signed_angle)
+    s, e = 30, 45
 
-    # print(signed_angle)
+    signed_angle = gps_matcher.get_signed_angle_from_images(s,e)
+    unsigned_angle = abs(signed_angle)
 
-    # gps_matcher.match_single_pair(0, 10, signed_angle, unsigned_angle)
-    match_result, match_info = gps_matcher.gps_prior_matching()
-    gps_matcher.write_match_result(match_result)
-    gps_matcher.write_match_info(match_info)
-    gps_matcher.commit_and_close_connection()
+    print(signed_angle)
 
+    # gps1 = gps_matcher.get_gps_from_image(s)
+    # gps2 = gps_matcher.get_gps_from_image(e)
+
+    # print(gps1)
+    # print(gps2)
+
+    # print(gps_matcher.get_accumulated_distance(s, e))
+
+    distance = gps_matcher.get_accumulated_distance(s, e)
+    print(distance)
+
+    gps_matcher.match_single_pair(s, e, signed_angle, distance)
+    # match_result, match_info = gps_matcher.gps_prior_matching()
+    # gps_matcher.write_match_result(match_result)
+    # gps_matcher.write_match_info(match_info)
+    # gps_matcher.commit_and_close_connection()
+
+    # print(f'{(time.time() - t1)/60.0} min' )
