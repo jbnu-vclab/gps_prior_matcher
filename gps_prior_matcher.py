@@ -74,7 +74,6 @@ class GPSPriorMatcher:
         self.precompute_adjacent_vectors()
 
         # vis.draw_gps_data_with_distance(self.gps, self.accumulated_dist)
-
     
     def parse_args(self):
         parser = argparse.ArgumentParser()
@@ -191,7 +190,6 @@ class GPSPriorMatcher:
     def get_vector_from_image(self, image_id:int) -> np.array:
         #* use previous adjacent vector if image_id2 is last index
         vec = self.get_n_mean_vector(image_id, 8)
-
         return vec
     
     def precompute_gps(self):
@@ -294,11 +292,6 @@ class GPSPriorMatcher:
         img2 = cv2.rectangle(img2, (int(overlap_begin2[0]), int(overlap_begin2[1])), (int(overlap_end2[0]), int(overlap_end2[1])), (80, 248, 146), 8)
         res = vis.draw_matches_pair(img1, img2, overlap_keypoints1, overlap_keypoints2, good_matches)
 
-        cv2.imwrite(f'C:/Users/DongwonJeong/Desktop/TestOut4/{image_id1}_{image_id2}.jpg', res)
-        # res = cv2.resize(res, (0, 0), fx=0.5, fy=0.5)
-        # cv2.imshow(f'{image_id1}_{image_id2}', res)
-        # cv2.waitKey()
-        # cv2.destroyAllWindows()
         matches = self.change_indices_for_db(good_matches, overlap_indices1, overlap_indices2)
 
         return matches
@@ -395,17 +388,7 @@ def debug(gps_matcher):
     s, e = 0, 5 
 
     signed_angle = gps_matcher.get_signed_angle_from_images(s,e)
-    unsigned_angle = abs(signed_angle)
-
     print(signed_angle)
-
-    # gps1 = gps_matcher.get_gps_from_image(s)
-    # gps2 = gps_matcher.get_gps_from_image(e)
-
-    # print(gps1)
-    # print(gps2)
-
-    # print(gps_matcher.get_accumulated_distance(s, e))
 
     distance = gps_matcher.get_accumulated_distance(s, e)
     print(distance)
