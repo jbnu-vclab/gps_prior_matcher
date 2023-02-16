@@ -13,7 +13,7 @@ Every frames must have gps information with EXIF.
 
 ## How to use
 1. Extract SIFT features (COLMAP)
-2. **Run gps_rior_matcher.py**
+2. **Run gps_prior_matcher.py**
    * Check gps_prior_matcher.py for various options.
 3. Do Geometric verification (COLMAP)
    * COLMAP only uses match pairs in two_view_geometries table.
