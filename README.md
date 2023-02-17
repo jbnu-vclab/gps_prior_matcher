@@ -9,7 +9,7 @@ Applies above riding video properties in feature matching step using gps informa
 
 ## Dataset
 The riding video frames which only moves to forward.  
-Every frames must have gps information with EXIF.
+Every frames must have gps information with EXIF. (e.g. spline interpolation)
 
 ## How to use
 1. Extract SIFT features (COLMAP)
