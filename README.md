@@ -1,6 +1,6 @@
 # GPS Prior Matcher
 ## About
-This software is a feature matcher with gps prior (overlap zone acquisition).  
+This software is a feature matcher with gps prior (overlap zone assumption).  
 We use COLMAP for feature extraction, geometric verification, 3d reconstruction, and its database format to handle data.
 
 ![fig1](https://user-images.githubusercontent.com/34531488/218943488-bc327651-469e-40ae-8426-ffb3e0ac63e3.png)
