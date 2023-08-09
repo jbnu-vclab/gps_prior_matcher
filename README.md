@@ -15,7 +15,7 @@ Every frames must have gps information with EXIF. (e.g. spline interpolation)
 1. Extract SIFT features (COLMAP)
 2. **Run gps_prior_matcher.py**
    * Check gps_prior_matcher.py for various options.
-3. Do Geometric verification (COLMAP)
+3. Do geometric verification (COLMAP)
    * COLMAP only uses match pairs in two_view_geometries table.
    * You can run custom feature match with match_info.txt to get two_view_geometries.
 4. Run 3D reconstruction (COLMAP)
